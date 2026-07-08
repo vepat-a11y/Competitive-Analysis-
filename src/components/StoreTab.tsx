@@ -40,6 +40,10 @@ export default function StoreTab({ storeId, storeName }: StoreTabProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | 'sale' | 'hot' | 'oos'>('all');
   
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 50;
+
   // Selected Item for deep historical tracking
   const [selectedItem, setSelectedItem] = useState<CatalogItem | null>(null);
 
@@ -65,7 +69,12 @@ export default function StoreTab({ storeId, storeName }: StoreTabProps) {
 
   useEffect(() => {
     fetchStoreData();
+    setCurrentPage(1);
   }, [storeId]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, activeFilter]);
 
   // Filter Catalog
   const filteredCatalog = catalog.filter(item => {
@@ -87,6 +96,12 @@ export default function StoreTab({ storeId, storeName }: StoreTabProps) {
     }
     return true;
   });
+
+  const totalPages = Math.ceil(filteredCatalog.length / itemsPerPage) || 1;
+  const paginatedCatalog = filteredCatalog.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
 
   return (
     <div className="flex-1 bg-slate-50 overflow-hidden flex h-screen" id={`store-tab-${storeId}`}>
@@ -186,7 +201,7 @@ export default function StoreTab({ storeId, storeName }: StoreTabProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredCatalog.map((item) => {
+                  {paginatedCatalog.map((item) => {
                     const isSelected = selectedItem?.id === item.id;
                     const isOOS = item.stock_level === 0;
                     
@@ -246,6 +261,47 @@ export default function StoreTab({ storeId, storeName }: StoreTabProps) {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination footer */}
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <span className="text-3xs font-mono text-slate-500">
+                Showing <strong className="text-slate-700">{Math.min(filteredCatalog.length, (currentPage - 1) * itemsPerPage + 1)}-{Math.min(filteredCatalog.length, currentPage * itemsPerPage)}</strong> of <strong className="text-slate-700">{filteredCatalog.length}</strong> monitored products
+              </span>
+              <div className="flex items-center space-x-1">
+                <button
+                  disabled={currentPage === 1}
+                  onClick={() => setCurrentPage(1)}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 disabled:opacity-40 disabled:hover:bg-white text-4xs font-bold font-mono uppercase rounded-lg cursor-pointer transition-colors"
+                >
+                  First
+                </button>
+                <button
+                  disabled={currentPage === 1}
+                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 disabled:opacity-40 disabled:hover:bg-white text-4xs font-bold font-mono uppercase rounded-lg cursor-pointer transition-colors"
+                >
+                  Prev
+                </button>
+                <span className="px-3 py-1.5 text-4xs font-bold font-mono text-slate-600 bg-slate-100/85 rounded-lg border border-slate-200/50">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  disabled={currentPage === totalPages}
+                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 disabled:opacity-40 disabled:hover:bg-white text-4xs font-bold font-mono uppercase rounded-lg cursor-pointer transition-colors"
+                >
+                  Next
+                </button>
+                <button
+                  disabled={currentPage === totalPages}
+                  onClick={() => setCurrentPage(totalPages)}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 disabled:opacity-40 disabled:hover:bg-white text-4xs font-bold font-mono uppercase rounded-lg cursor-pointer transition-colors"
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+
           </div>
         )}
       </div>

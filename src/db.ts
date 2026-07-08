@@ -41,6 +41,7 @@ interface DBData {
 class DatabaseWrapper {
   private filePath: string;
   private data: DBData;
+  public isSeeding = false;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -74,6 +75,10 @@ class DatabaseWrapper {
     }
   }
 
+  public forceSave(): void {
+    this.save();
+  }
+
   async run(sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> {
     const query = sql.trim().replace(/\s+/g, ' ');
     const lowerQuery = query.toLowerCase();
@@ -89,7 +94,7 @@ class DatabaseWrapper {
         { id: 3, name: 'Straight Up Wines & Liquors', domain: 'straightupliquor.com', sitemap_url: 'https://straightupliquor.com/sitemap.xml' }
       ];
       this.data.nextStoreId = 4;
-      this.save();
+      if (!this.isSeeding) this.save();
       return { lastID: 3, changes: 3 };
     }
 
@@ -107,7 +112,7 @@ class DatabaseWrapper {
           upc,
           first_seen_date
         });
-        this.save();
+        if (!this.isSeeding) this.save();
         return { lastID: id, changes: 1 };
       } else {
         return { lastID: existing.id, changes: 0 };
@@ -124,7 +129,7 @@ class DatabaseWrapper {
           sale_price,
           stock_level
         };
-        this.save();
+        if (!this.isSeeding) this.save();
         return { lastID: this.data.daily_metrics[existingIndex].id, changes: 1 };
       } else {
         const id = this.data.nextMetricId++;
@@ -136,9 +141,23 @@ class DatabaseWrapper {
           sale_price,
           stock_level
         });
-        this.save();
+        if (!this.isSeeding) this.save();
         return { lastID: id, changes: 1 };
       }
+    }
+
+    if (lowerQuery.includes('delete from daily_metrics')) {
+      this.data.daily_metrics = [];
+      this.data.nextMetricId = 1;
+      if (!this.isSeeding) this.save();
+      return { lastID: 0, changes: 1 };
+    }
+
+    if (lowerQuery.includes('delete from products')) {
+      this.data.products = [];
+      this.data.nextProductId = 1;
+      if (!this.isSeeding) this.save();
+      return { lastID: 0, changes: 1 };
     }
 
     return { lastID: 0, changes: 0 };
@@ -240,33 +259,65 @@ class DatabaseWrapper {
 
 export const db = new DatabaseWrapper(DB_PATH);
 
-const SAMPLE_PRODUCTS = [
-  { name: "Tito's Handmade Vodka", size: "750ml", upc: "015645001150", base_price: 21.99, is_sale: true },
-  { name: "Tito's Handmade Vodka", size: "1.75L", upc: "015645001174", base_price: 37.99, is_sale: false },
-  { name: "Jameson Irish Whiskey", size: "750ml", upc: "080432104111", base_price: 32.99, is_sale: true },
-  { name: "Jack Daniel's Old No. 7 Tennessee Whiskey", size: "750ml", upc: "082184090442", base_price: 26.99, is_sale: false },
-  { name: "Jack Daniel's Old No. 7 Tennessee Whiskey", size: "1L", upc: "082184090466", base_price: 34.99, is_sale: true },
-  { name: "Makers Mark Bourbon", size: "750ml", upc: "085246500037", base_price: 31.99, is_sale: false },
-  { name: "Grey Goose Vodka", size: "750ml", upc: "080660610014", base_price: 34.99, is_sale: true },
-  { name: "Grey Goose Vodka", size: "1.75L", upc: "080660610038", base_price: 59.99, is_sale: false },
-  { name: "Josh Cellars Cabernet Sauvignon", size: "750ml", upc: "896346001476", base_price: 15.99, is_sale: true },
-  { name: "Josh Cellars Chardonnay", size: "750ml", upc: "896346001469", base_price: 14.99, is_sale: false },
-  { name: "Santa Margherita Pinot Grigio", size: "750ml", upc: "086899001151", base_price: 24.99, is_sale: true },
-  { name: "Meiomi Pinot Noir", size: "750ml", upc: "890533002206", base_price: 22.99, is_sale: false },
-  { name: "Yellow Tail Shiraz", size: "750ml", upc: "031259000188", base_price: 8.99, is_sale: false },
-  { name: "Yellow Tail Chardonnay", size: "1.5L", upc: "031259000300", base_price: 13.99, is_sale: true },
-  { name: "Crown Royal Canadian Whisky", size: "750ml", upc: "082000200155", base_price: 28.99, is_sale: false },
-  { name: "Hennessy VS Cognac", size: "750ml", upc: "081753810754", base_price: 45.99, is_sale: false },
-  { name: "Aperol Liqueur", size: "750ml", upc: "721059001402", base_price: 27.99, is_sale: true },
-  { name: "Casamigos Blanco Tequila", size: "750ml", upc: "855566005011", base_price: 49.99, is_sale: true },
-  { name: "Patron Silver Tequila", size: "750ml", upc: "721733000022", base_price: 52.99, is_sale: false },
-  { name: "Captain Morgan Spiced Rum", size: "750ml", upc: "082000104279", base_price: 18.99, is_sale: true },
-  { name: "The Macallan 12 Year Double Cask", size: "750ml", upc: "083259111244", base_price: 84.99, is_sale: false },
-  { name: "Kim Crawford Sauvignon Blanc", size: "750ml", upc: "842704000122", base_price: 17.99, is_sale: true },
-  { name: "Veuve Clicquot Yellow Label Brut", size: "750ml", upc: "081753823457", base_price: 64.99, is_sale: false },
-  { name: "Hendrick's Gin", size: "750ml", upc: "083664868731", base_price: 36.99, is_sale: true },
-  { name: "La Marca Prosecco", size: "750ml", upc: "085000017163", base_price: 16.99, is_sale: false }
-];
+function generateAllSampleProducts(): Array<{ name: string; size: string; upc: string; base_price: number; is_sale: boolean }> {
+  const brands = [
+    "Tito's", "Jameson", "Jack Daniel's", "Maker's Mark", "Grey Goose", "Josh Cellars",
+    "Santa Margherita", "Meiomi", "Yellow Tail", "Crown Royal", "Hennessy", "Aperol",
+    "Casamigos", "Patron", "Captain Morgan", "The Macallan", "Kim Crawford", "Veuve Clicquot",
+    "Hendrick's", "La Marca", "Bombay Sapphire", "Woodford Reserve", "Espolon", "Bulleit",
+    "Glenmorangie", "Absolut", "Bacardi", "Tanqueray", "Don Julio", "Decoy"
+  ];
+  const categories = [
+    "Handmade Vodka", "Irish Whiskey", "Tennessee Whiskey", "Kentucky Straight Bourbon",
+    "French Premium Vodka", "Cabernet Sauvignon", "Chardonnay", "Pinot Grigio", "Pinot Noir",
+    "Shiraz", "Blended Canadian Whisky", "VS Cognac", "Aperitivo Liqueur", "Blanco Tequila",
+    "Reposado Tequila", "Spiced Gold Rum", "Single Malt Scotch 12 Year", "Sauvignon Blanc",
+    "Brut Champagne", "Botanical Gin", "Prosecco", "London Dry Gin", "Double Oak Bourbon",
+    "Silver Tequila", "Rye Whiskey", "Highland Single Malt", "Swedish Vodka", "Superior White Rum",
+    "Anejo Tequila", "Merlot"
+  ];
+  const variations = [
+    "Original", "Reserve", "Select", "Small Batch", "Single Barrel", "Special Edition",
+    "Double Cask", "Triple Distilled", "Legacy", "Signature Blend", "Master's Edition",
+    "Private Selection", "Founders Reserve", "Old No. 7", "Classic", "Premium", "Platinum"
+  ];
+  const sizes = ["375ml", "750ml", "1L", "1.75L"];
+
+  const list: Array<{ name: string; size: string; upc: string; base_price: number; is_sale: boolean }> = [];
+  
+  let state = 12345;
+  function nextRand() {
+    state = (state * 9301 + 49297) % 233280;
+    return state / 233280;
+  }
+
+  // Generate 1100 deterministic products
+  for (let i = 0; i < 1100; i++) {
+    const brand = brands[Math.floor(nextRand() * brands.length)];
+    const cat = categories[Math.floor(nextRand() * categories.length)];
+    const variant = variations[Math.floor(nextRand() * variations.length)];
+    const size = sizes[Math.floor(nextRand() * sizes.length)];
+    
+    const name = `${brand} ${variant} ${cat}`;
+    
+    const upcNum = Math.floor(100000000000 + nextRand() * 800000000000);
+    const upc = String(upcNum);
+    
+    let base_price = 15.99 + nextRand() * 85.00;
+    if (size === "375ml") base_price *= 0.6;
+    else if (size === "1L") base_price *= 1.3;
+    else if (size === "1.75L") base_price *= 1.7;
+    base_price = parseFloat(base_price.toFixed(2));
+
+    const is_sale = nextRand() < 0.35;
+    
+    list.push({ name, size, upc, base_price, is_sale });
+  }
+
+  return list;
+}
+
+const SAMPLE_PRODUCTS = generateAllSampleProducts();
 
 // Helper to generate custom pseudo-random values based on seed numbers
 function seededRandom(seed: number) {
@@ -326,13 +377,21 @@ export async function initDatabaseAndSeedIfEmpty(): Promise<void> {
     `);
   }
 
-  // Seed Products and Daily Metrics if empty
+  // Seed Products and Daily Metrics if empty or not fully synchronized
   const productCount = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM products');
-  if (productCount && productCount.count === 0) {
-    console.log('[DB] Starting 30-day historical high-fidelity seeding cycle...');
+  if (productCount && productCount.count < 3000) {
+    console.log('[DB] Database has fewer than 3000 products (has ' + productCount.count + '). Resetting and performing 30-day historical high-fidelity seeding cycle...');
+    
+    // Clear legacy collections first
+    await db.run('DELETE FROM daily_metrics');
+    await db.run('DELETE FROM products');
+
     const storesList = await db.all<Store>('SELECT * FROM stores');
     const today = new Date();
     const daysOfHistory = 30;
+
+    // Enable in-memory seeding mode to keep performance extremely high!
+    db.isSeeding = true;
 
     // 1. Create product catalog first
     for (const store of storesList) {
@@ -444,6 +503,10 @@ export async function initDatabaseAndSeedIfEmpty(): Promise<void> {
       }
     }
     
+    // Disable seeding mode and flush database once to disk!
+    db.isSeeding = false;
+    db.forceSave();
+    
     console.log('[DB] Seeding cycle complete! High-fidelity competitor intelligence dataset ready.');
   } else {
     console.log('[DB] SQLite database already populated.');
@@ -464,6 +527,9 @@ export async function triggerDailyScrape(): Promise<void> {
 
   const stores = await db.all<Store>('SELECT * FROM stores');
   const products = await db.all<Product>('SELECT * FROM products');
+
+  // Use in-memory seeding flag to fast-batch the inserts
+  db.isSeeding = true;
 
   for (const store of stores) {
     const storeProds = products.filter(p => p.store_id === store.id);
@@ -513,6 +579,10 @@ export async function triggerDailyScrape(): Promise<void> {
       `, [prod.id, todayStr, regular_price, sale_price, stock_level]);
     }
   }
+
+  // Save the state to disk and turn off isSeeding mode
+  db.isSeeding = false;
+  db.forceSave();
 
   console.log('[Manual Scrape] Completed successfully!');
 }
