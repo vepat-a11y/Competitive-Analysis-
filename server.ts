@@ -85,40 +85,40 @@ function dbQuery(sql: string, params: any[] = []): Promise<any[]> {
   });
 }
 
-// Global scraper execution state
-let scraperProcess: any = null;
-let scraperLogs: string[] = [];
-let scraperIsRunning = false;
+// Scraper execution states mapped by key (storeId or 'global')
+interface ScraperState {
+  process: any;
+  isRunning: boolean;
+  logs: string[];
+}
+const scrapers = new Map<string | number, ScraperState>();
 
 // --- API ENDPOINTS ---
 
-// 1. Dashboard summary stats
+// 1. Dashboard summary stats (optimized to fetch latest metrics, not date-locked)
 app.get('/api/dashboard', async (req, res) => {
   try {
-    const todayStr = new Date().toISOString().split('T')[0];
-    const yesterdayStr = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-
     // Total Stores
     const storesCount = await dbQuery('SELECT COUNT(*) as count FROM stores');
     
     // Total Products
     const productsCount = await dbQuery('SELECT COUNT(*) as count FROM products');
 
-    // On Sale Today
+    // On Sale (using latest daily metrics for each product)
     const saleCount = await dbQuery(
-      `SELECT COUNT(*) as count FROM daily_metrics 
-       WHERE scrape_date = ? AND sale_price IS NOT NULL AND sale_price < regular_price`,
-      [todayStr]
+      `SELECT COUNT(*) as count FROM daily_metrics m
+       WHERE m.scrape_date = (SELECT MAX(scrape_date) FROM daily_metrics WHERE product_id = m.product_id)
+         AND m.sale_price IS NOT NULL AND m.sale_price < m.regular_price`
     );
 
-    // Out of Stock Today
+    // Out of Stock (using latest daily metrics for each product)
     const oosCount = await dbQuery(
-      `SELECT COUNT(*) as count FROM daily_metrics 
-       WHERE scrape_date = ? AND stock_level = 0`,
-      [todayStr]
+      `SELECT COUNT(*) as count FROM daily_metrics m
+       WHERE m.scrape_date = (SELECT MAX(scrape_date) FROM daily_metrics WHERE product_id = m.product_id)
+         AND m.stock_level = 0`
     );
 
-    // Sales Velocity (Top Selling Yesterday vs Today)
+    // Sales Velocity (Top Selling between two most recent crawls)
     const velocityData = await dbQuery(
       `SELECT 
         s.name as store, p.name as product, p.size as size,
@@ -127,12 +127,15 @@ app.get('/api/dashboard', async (req, res) => {
         (m_yesterday.stock_level - m_today.stock_level) as unitsSold
       FROM products p
       JOIN stores s ON p.store_id = s.id
-      JOIN daily_metrics m_today ON p.id = m_today.product_id AND m_today.scrape_date = ?
-      JOIN daily_metrics m_yesterday ON p.id = m_yesterday.product_id AND m_yesterday.scrape_date = ?
+      JOIN daily_metrics m_today ON p.id = m_today.product_id AND m_today.scrape_date = (
+        SELECT MAX(scrape_date) FROM daily_metrics WHERE product_id = p.id
+      )
+      JOIN daily_metrics m_yesterday ON p.id = m_yesterday.product_id AND m_yesterday.scrape_date = (
+        SELECT MAX(scrape_date) FROM daily_metrics WHERE product_id = p.id AND scrape_date < m_today.scrape_date
+      )
       WHERE (m_yesterday.stock_level - m_today.stock_level) > 0
       ORDER BY unitsSold DESC
-      LIMIT 20`,
-      [todayStr, yesterdayStr]
+      LIMIT 20`
     );
 
     res.json({
@@ -161,11 +164,44 @@ app.get('/api/stores', async (req, res) => {
   }
 });
 
-// 3. Get catalog for a specific store
+// Create/Add a new store
+app.post('/api/stores', async (req, res) => {
+  try {
+    const { name, domain, sitemap_url } = req.body;
+    if (!name || !domain || !sitemap_url) {
+      return res.status(400).json({ success: false, error: 'Missing name, domain, or sitemap_url' });
+    }
+    await dbQuery(
+      'INSERT INTO stores (name, domain, sitemap_url) VALUES (?, ?, ?)',
+      [name, domain, sitemap_url]
+    );
+    res.json({ success: true, message: 'Store added successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Delete a store
+app.delete('/api/stores/:id', async (req, res) => {
+  try {
+    const storeId = Number(req.params.id);
+    if (!storeId) {
+      return res.status(400).json({ success: false, error: 'Invalid Store ID' });
+    }
+    // Perform manual cascaded deletion
+    await dbQuery('DELETE FROM daily_metrics WHERE product_id IN (SELECT id FROM products WHERE store_id = ?)', [storeId]);
+    await dbQuery('DELETE FROM products WHERE store_id = ?', [storeId]);
+    await dbQuery('DELETE FROM stores WHERE id = ?', [storeId]);
+    res.json({ success: true, message: 'Store and all related products and metrics deleted successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 3. Get catalog for a specific store (Optimized to pull the latest daily metrics)
 app.get('/api/catalog', async (req, res) => {
   try {
     const { storeId, search } = req.query;
-    const todayStr = new Date().toISOString().split('T')[0];
 
     let query = `
       SELECT p.id, p.name as product, p.size as size, p.upc as upc, 
@@ -173,10 +209,11 @@ app.get('/api/catalog', async (req, res) => {
              p.first_seen_date as addedOn, s.name as storeName
       FROM products p
       JOIN stores s ON p.store_id = s.id
-      LEFT JOIN daily_metrics m ON p.id = m.product_id AND m.scrape_date = ?
+      LEFT JOIN daily_metrics m ON p.id = m.product_id AND m.scrape_date = (
+        SELECT MAX(scrape_date) FROM daily_metrics WHERE product_id = p.id
+      )
     `;
-    const params: any[] = [todayStr];
-
+    const params: any[] = [];
     const conditions: string[] = [];
 
     if (storeId) {
@@ -202,51 +239,69 @@ app.get('/api/catalog', async (req, res) => {
   }
 });
 
-// 4. Trigger Scraper
+// 4. Trigger Scraper (supports individual storeId run)
 app.post('/api/scraper/run', (req, res) => {
-  if (scraperIsRunning) {
-    return res.status(400).json({ success: false, error: 'Scraper is already running' });
+  const storeId = req.body?.storeId || req.query?.storeId || 'global';
+  const key = storeId === 'global' ? 'global' : Number(storeId);
+
+  const existing = scrapers.get(key);
+  if (existing?.isRunning) {
+    return res.status(400).json({ success: false, error: 'Scraper is already running for this target' });
   }
 
-  scraperIsRunning = true;
-  scraperLogs = [`[${new Date().toLocaleTimeString()}] Starting scraper process...`];
+  const args = ['scraper.py'];
+  if (storeId !== 'global') {
+    args.push(String(storeId));
+  }
 
-  // Spawn python3 scraper.py
-  scraperProcess = spawn('python3', ['scraper.py']);
+  const logs: string[] = [`[${new Date().toLocaleTimeString()}] Spawning headless browser session...`];
+  const proc = spawn('python3', args);
 
-  scraperProcess.stdout.on('data', (data: Buffer) => {
+  scrapers.set(key, {
+    process: proc,
+    isRunning: true,
+    logs
+  });
+
+  proc.stdout.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n');
     lines.forEach(line => {
       if (line.trim()) {
-        scraperLogs.push(`[${new Date().toLocaleTimeString()}] ${line}`);
+        logs.push(`[${new Date().toLocaleTimeString()}] ${line}`);
       }
     });
   });
 
-  scraperProcess.stderr.on('data', (data: Buffer) => {
+  proc.stderr.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n');
     lines.forEach(line => {
       if (line.trim()) {
-        scraperLogs.push(`[${new Date().toLocaleTimeString()}] [ERROR] ${line}`);
+        logs.push(`[${new Date().toLocaleTimeString()}] [ERROR] ${line}`);
       }
     });
   });
 
-  scraperProcess.on('close', (code: number) => {
-    scraperIsRunning = false;
-    scraperLogs.push(`[${new Date().toLocaleTimeString()}] Scraper process finished with exit code ${code}`);
-    scraperProcess = null;
+  proc.on('close', (code: number) => {
+    const state = scrapers.get(key);
+    if (state) {
+      state.isRunning = false;
+      state.logs.push(`[${new Date().toLocaleTimeString()}] Crawl process finished with exit code ${code}`);
+    }
   });
 
   res.json({ success: true, message: 'Scraper triggered successfully' });
 });
 
-// 5. Get scraper status and logs
+// 5. Get scraper status and logs for specific storeId
 app.get('/api/scraper/status', (req, res) => {
+  const storeId = req.query?.storeId || 'global';
+  const key = storeId === 'global' ? 'global' : Number(storeId);
+  const state = scrapers.get(key);
+
   res.json({
     success: true,
-    isRunning: scraperIsRunning,
-    logs: scraperLogs.slice(-100) // return last 100 log lines
+    isRunning: state?.isRunning || false,
+    logs: state?.logs ? state.logs.slice(-100) : []
   });
 });
 
@@ -259,7 +314,7 @@ app.post('/api/database/reset', async (req, res) => {
     initDbProcess.stderr.on('data', (data) => output += data.toString());
 
     initDbProcess.on('close', (code) => {
-      // Re-initialize sqlite connection in case schema changed or database was re-created
+      // Re-initialize sqlite connection
       if (sqliteDb && typeof sqliteDb.close === 'function') {
         try { sqliteDb.close(); } catch (e) {}
       }

@@ -14,7 +14,12 @@ import {
   Info,
   Calendar,
   Layers,
-  ArrowUpDown
+  ArrowUpDown,
+  Plus,
+  Trash2,
+  Globe,
+  FileCode,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -54,6 +59,11 @@ interface Store {
   sitemap_url: string;
 }
 
+interface ScraperState {
+  isRunning: boolean;
+  logs: string[];
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'global' | number>('global');
   const [stats, setStats] = useState<Stats>({ stores: 0, products: 0, onSale: 0, outOfStock: 0 });
@@ -62,12 +72,19 @@ export default function App() {
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [search, setSearch] = useState('');
   
-  // Scraper status & logs state
-  const [isScraping, setIsScraping] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
+  // Scraper states per key (storeId or 'global')
+  const [scrapingStates, setScrapingStates] = useState<Record<string | number, ScraperState>>({});
+  
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   
+  // Add Store Modal State
+  const [isAddStoreOpen, setIsAddStoreOpen] = useState(false);
+  const [newStoreName, setNewStoreName] = useState('');
+  const [newStoreDomain, setNewStoreDomain] = useState('');
+  const [newStoreSitemap, setNewStoreSitemap] = useState('');
+  const [isSubmittingStore, setIsSubmittingStore] = useState(false);
+
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Sorting state
@@ -79,35 +96,46 @@ export default function App() {
     fetchInitialData();
   }, []);
 
-  // Poll scraper logs if running
+  // Poll scraper logs for the currently active tab if running
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
-    
-    if (isScraping) {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch('/api/scraper/status');
-          const data = await res.json();
-          if (data.success) {
-            setIsScraping(data.isRunning);
-            setLogs(data.logs);
-            // If it just stopped, refresh data
-            if (!data.isRunning) {
-              fetchInitialData();
-            }
+    const currentStatus = scrapingStates[activeTab] || { isRunning: false, logs: [] };
+
+    // We fetch immediately, and poll if it is marked as running or if we don't have its state yet
+    const shouldPoll = currentStatus.isRunning || scrapingStates[activeTab] === undefined;
+
+    const pollStatus = async () => {
+      try {
+        const param = activeTab === 'global' ? 'global' : activeTab;
+        const res = await fetch(`/api/scraper/status?storeId=${param}`);
+        const data = await res.json();
+        if (data.success) {
+          setScrapingStates(prev => ({
+            ...prev,
+            [activeTab]: { isRunning: data.isRunning, logs: data.logs }
+          }));
+          
+          // If it transitions from running to finished, reload data
+          if (currentStatus.isRunning && !data.isRunning) {
+            fetchInitialData();
           }
-        } catch (err) {
-          console.error('Error fetching scraper status:', err);
         }
-      }, 1500);
+      } catch (err) {
+        console.error('Error fetching scraper status:', err);
+      }
+    };
+
+    if (shouldPoll) {
+      pollStatus();
+      interval = setInterval(pollStatus, 1500);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isScraping]);
+  }, [activeTab, scrapingStates[activeTab]?.isRunning]);
 
-  // Fetch catalog whenever active tab, search term, or scraper status changes
+  // Fetch catalog whenever active tab or search term changes
   useEffect(() => {
     fetchCatalog();
   }, [activeTab, search]);
@@ -117,7 +145,7 @@ export default function App() {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [logs]);
+  }, [scrapingStates[activeTab]?.logs]);
 
   const fetchInitialData = async () => {
     try {
@@ -138,12 +166,15 @@ export default function App() {
         setStores(storesData.stores || []);
       }
 
-      // 3. Fetch current status of scraper
-      const statusRes = await fetch('/api/scraper/status');
+      // 3. Fetch status for current active tab
+      const param = activeTab === 'global' ? 'global' : activeTab;
+      const statusRes = await fetch(`/api/scraper/status?storeId=${param}`);
       const statusData = await statusRes.json();
       if (statusData.success) {
-        setIsScraping(statusData.isRunning);
-        setLogs(statusData.logs || []);
+        setScrapingStates(prev => ({
+          ...prev,
+          [activeTab]: { isRunning: statusData.isRunning, logs: statusData.logs || [] }
+        }));
       }
 
       await fetchCatalog();
@@ -186,13 +217,19 @@ export default function App() {
     setTimeout(() => setIsRefreshing(false), 800);
   };
 
-  const handleRunScraper = async () => {
+  const handleRunScraperForStore = async (storeId: number | 'global') => {
     try {
-      const res = await fetch('/api/scraper/run', { method: 'POST' });
+      const res = await fetch('/api/scraper/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storeId })
+      });
       const data = await res.json();
       if (data.success) {
-        setIsScraping(true);
-        setLogs([`[${new Date().toLocaleTimeString()}] Scraper process triggered...`]);
+        setScrapingStates(prev => ({
+          ...prev,
+          [storeId]: { isRunning: true, logs: [`[${new Date().toLocaleTimeString()}] Scraper triggered...`] }
+        }));
       } else {
         alert(`Failed to start scraper: ${data.error}`);
       }
@@ -201,15 +238,71 @@ export default function App() {
     }
   };
 
+  const handleAddStore = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStoreName || !newStoreDomain || !newStoreSitemap) {
+      alert('Please fill out all fields');
+      return;
+    }
+
+    try {
+      setIsSubmittingStore(true);
+      const res = await fetch('/api/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newStoreName,
+          domain: newStoreDomain.trim().replace(/^https?:\/\//i, ''),
+          sitemap_url: newStoreSitemap.trim()
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setIsAddStoreOpen(false);
+        setNewStoreName('');
+        setNewStoreDomain('');
+        setNewStoreSitemap('');
+        await fetchInitialData();
+      } else {
+        alert(`Failed to add store: ${data.error}`);
+      }
+    } catch (err) {
+      alert('Error adding store to database');
+    } finally {
+      setIsSubmittingStore(false);
+    }
+  };
+
+  const handleDeleteStore = async (storeId: number) => {
+    const storeName = stores.find(s => s.id === storeId)?.name || 'this competitor';
+    if (!window.confirm(`Are you sure you want to delete ${storeName}? This will permanently remove all of its scraped products and historical metrics.`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/stores/${storeId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setActiveTab('global');
+        await fetchInitialData();
+      } else {
+        alert(`Failed to delete store: ${data.error}`);
+      }
+    } catch (err) {
+      alert('Error deleting competitor store');
+    }
+  };
+
   const handleResetDb = async () => {
-    if (!window.confirm('Are you sure you want to re-seed and reset the stores database? This will clear daily metrics.')) {
+    if (!window.confirm('Are you sure you want to re-seed and reset the stores database? This will revert default competitor domains and wipe custom metrics.')) {
       return;
     }
     try {
       const res = await fetch('/api/database/reset', { method: 'POST' });
       const data = await res.json();
       if (data.success) {
-        alert('Database re-seeded successfully!');
+        alert('Database reset and re-seeded successfully!');
+        setActiveTab('global');
         fetchInitialData();
       } else {
         alert(`Error: ${data.output}`);
@@ -246,6 +339,9 @@ export default function App() {
     return sorted;
   };
 
+  const activeStore = stores.find(s => s.id === activeTab);
+  const activeScraper = scrapingStates[activeTab] || { isRunning: false, logs: [] };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 pb-16">
       {/* Header */}
@@ -266,7 +362,7 @@ export default function App() {
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleRefresh}
-              disabled={isRefreshing || isScraping}
+              disabled={isRefreshing}
               className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-slate-700 hover:bg-slate-800 transition-all ${
                 isRefreshing ? 'animate-spin opacity-50' : ''
               }`}
@@ -281,68 +377,12 @@ export default function App() {
               <Database className="w-3.5 h-3.5" />
               Reset DB
             </button>
-            <button
-              onClick={handleRunScraper}
-              disabled={isScraping}
-              className={`flex items-center gap-1.5 px-5 py-2 text-xs font-bold rounded-lg text-slate-950 transition-all shadow-lg shadow-amber-500/10 ${
-                isScraping 
-                  ? 'bg-slate-800 border border-slate-700 text-slate-400 cursor-not-allowed' 
-                  : 'bg-amber-400 hover:bg-amber-300 active:scale-95'
-              }`}
-            >
-              {isScraping ? (
-                <>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                  Scraping...
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  Run Crawler
-                </>
-              )}
-            </button>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 md:px-8 mt-8">
         
-        {/* Scraper Live Monitor Panel */}
-        <AnimatePresence>
-          {isScraping && (
-            <motion.div 
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="bg-slate-950 text-emerald-400 border border-slate-800 rounded-xl shadow-2xl p-4 mb-8 font-mono text-xs overflow-hidden"
-            >
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
-                <div className="flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-amber-400 animate-pulse" />
-                  <span className="font-semibold text-slate-200">Active Scraping Session Logs</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span className="text-[10px] text-slate-400">Headless Playwright Crawler (Chrome)</span>
-                </div>
-              </div>
-              <div className="max-h-52 overflow-y-auto space-y-1 pr-2 scrollbar-thin">
-                {logs.length === 0 ? (
-                  <div className="text-slate-600 italic">Initializing Playwright scraper instance...</div>
-                ) : (
-                  logs.map((log, i) => (
-                    <div key={i} className="leading-relaxed">
-                      <span className="text-slate-500 select-none">[{i+1}]</span> {log}
-                    </div>
-                  ))
-                )}
-                <div ref={logEndRef} />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* Stats Summary Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
           {[
@@ -366,7 +406,7 @@ export default function App() {
         {/* Catalog Navigation Tabs */}
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="border-b border-slate-100 px-6 py-4 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 onClick={() => { setActiveTab('global'); setSearch(''); }}
                 className={`px-4 py-2 text-xs font-semibold rounded-lg transition-all ${
@@ -390,6 +430,13 @@ export default function App() {
                   {store.name.split("'")[0].split(' ')[0]} Catalog
                 </button>
               ))}
+              <button
+                onClick={() => setIsAddStoreOpen(true)}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg border border-dashed border-slate-300 hover:border-slate-400 hover:bg-slate-100 text-slate-600 hover:text-slate-800 transition-all flex items-center gap-1.5 ml-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Competitor
+              </button>
             </div>
 
             {/* Filter Search */}
@@ -406,6 +453,93 @@ export default function App() {
           </div>
 
           <div className="p-6">
+            
+            {/* Store Information / Actions bar */}
+            {activeTab !== 'global' && activeStore && (
+              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800">{activeStore.name}</h4>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-xs text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Globe className="w-3.5 h-3.5 text-slate-400" /> 
+                      Website: <a href={`https://${activeStore.domain}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-mono">{activeStore.domain}</a>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <FileCode className="w-3.5 h-3.5 text-slate-400" /> 
+                      Sitemap: <a href={activeStore.sitemap_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-mono">{activeStore.sitemap_url}</a>
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleRunScraperForStore(activeStore.id)}
+                    disabled={activeScraper.isRunning}
+                    className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-lg transition-all shadow-md ${
+                      activeScraper.isRunning
+                        ? 'bg-slate-800 border border-slate-700 text-slate-400 cursor-not-allowed'
+                        : 'bg-amber-400 hover:bg-amber-300 text-slate-950 active:scale-95'
+                    }`}
+                  >
+                    {activeScraper.isRunning ? (
+                      <>
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                        Crawling...
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3 h-3 fill-current" />
+                        Run Crawler
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => handleDeleteStore(activeStore.id)}
+                    className="flex items-center gap-1 px-3 py-2 text-xs font-semibold text-rose-600 hover:text-white hover:bg-rose-600 border border-rose-200 hover:border-rose-600 rounded-lg transition-all"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete Store
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Active Crawl Log Panel */}
+            <AnimatePresence>
+              {activeScraper.isRunning && (
+                <motion.div 
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="bg-slate-950 text-emerald-400 border border-slate-800 rounded-xl shadow-xl p-4 mb-6 font-mono text-xs overflow-hidden"
+                >
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+                    <div className="flex items-center gap-2">
+                      <Terminal className="w-4 h-4 text-amber-400 animate-pulse" />
+                      <span className="font-semibold text-slate-200">
+                        {activeTab === 'global' ? 'Global Scraper' : activeStore?.name} Live Logs
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      <span className="text-[10px] text-slate-400 font-sans">Playwright Browser Instance (Chrome)</span>
+                    </div>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto space-y-1 pr-2 scrollbar-thin">
+                    {activeScraper.logs.length === 0 ? (
+                      <div className="text-slate-600 italic">Initializing Playwright headless browser...</div>
+                    ) : (
+                      activeScraper.logs.map((log, i) => (
+                        <div key={i} className="leading-relaxed">
+                          <span className="text-slate-500 select-none">[{i+1}]</span> {log}
+                        </div>
+                      ))
+                    )}
+                    <div ref={logEndRef} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <AnimatePresence mode="wait">
               {activeTab === 'global' ? (
                 <motion.div
@@ -442,7 +576,7 @@ export default function App() {
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {velocity.map((item, index) => (
-                            <tr key={index} className="hover:bg-slate-50/50 transition-colors">
+                             <tr key={index} className="hover:bg-slate-50/50 transition-colors">
                               <td className="py-3.5 px-4 font-medium text-slate-900">{item.store}</td>
                               <td className="py-3.5 px-4 text-slate-700 font-medium">{item.product}</td>
                               <td className="py-3.5 px-4 text-slate-500 font-mono">{item.size || 'N/A'}</td>
@@ -508,7 +642,7 @@ export default function App() {
                       <Search className="w-8 h-8 text-slate-400 mx-auto mb-3" />
                       <h4 className="font-semibold text-slate-800 text-sm">No Matching Catalog Items</h4>
                       <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                        We couldn't find any products matching your active criteria. If you haven't populated the database yet, run the scraper first.
+                        We couldn't find any products matching your active criteria. If you haven't populated the database yet, click "Run Crawler" above to scrape this store's real-time catalog.
                       </p>
                     </div>
                   ) : (
@@ -532,14 +666,14 @@ export default function App() {
                               Stock Level <ArrowUpDown className="inline w-3 h-3 ml-0.5" />
                             </th>
                             <th className="py-3 px-4 text-center cursor-pointer hover:text-slate-800" onClick={() => handleSort('addedOn')}>
-                              Added On <ArrowUpDown className="inline w-3 h-3 ml-0.5" />
+                              First Scraped <ArrowUpDown className="inline w-3 h-3 ml-0.5" />
                             </th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {getSortedCatalog().map((item) => (
                             <tr key={item.id} className="hover:bg-slate-50/50 transition-colors">
-                              <td className="py-3 px-4">
+                              <td className="py-3.5 px-4">
                                 <div className="font-semibold text-slate-800">{item.product}</div>
                                 {item.salePrice && (
                                   <span className="inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-700 text-[9px] font-bold px-1.5 py-0.5 rounded-md mt-1 border border-emerald-100">
@@ -547,9 +681,9 @@ export default function App() {
                                   </span>
                                 )}
                               </td>
-                              <td className="py-3 px-4 font-mono text-slate-500">{item.size || 'N/A'}</td>
-                              <td className="py-3 px-4 font-mono text-slate-400 text-[10px]">{item.upc || '—'}</td>
-                              <td className="py-3 px-4 text-right">
+                              <td className="py-3.5 px-4 font-mono text-slate-500">{item.size || 'N/A'}</td>
+                              <td className="py-3.5 px-4 font-mono text-slate-400 text-[10px]">{item.upc || '—'}</td>
+                              <td className="py-3.5 px-4 text-right">
                                 {item.salePrice ? (
                                   <div>
                                     <span className="text-emerald-600 font-bold">${item.salePrice.toFixed(2)}</span>
@@ -563,7 +697,7 @@ export default function App() {
                                   <span className="text-slate-400 italic">No price data</span>
                                 )}
                               </td>
-                              <td className="py-3 px-4 text-center">
+                              <td className="py-3.5 px-4 text-center">
                                 <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                                   item.stock === 0
                                     ? 'bg-rose-50 text-rose-600 border border-rose-100'
@@ -574,7 +708,7 @@ export default function App() {
                                   {item.stock === null ? '—' : `${item.stock} in stock`}
                                 </span>
                               </td>
-                              <td className="py-3 px-4 text-center text-slate-400 font-mono text-[10px]">
+                              <td className="py-3.5 px-4 text-center text-slate-400 font-mono text-[10px]">
                                 {item.addedOn}
                               </td>
                             </tr>
@@ -589,6 +723,100 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {/* Elegant Add Store Modal */}
+      <AnimatePresence>
+        {isAddStoreOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.5 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsAddStoreOpen(false)}
+              className="absolute inset-0 bg-slate-950"
+            />
+            {/* Modal Body */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden relative z-10"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50/50">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-amber-500" />
+                  <h3 className="font-bold text-slate-900 text-sm uppercase tracking-wider">Add Competitor Store</h3>
+                </div>
+                <button
+                  onClick={() => setIsAddStoreOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-100 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleAddStore} className="p-6 space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Store Name</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Vintage Wines & Spirits"
+                    value={newStoreName}
+                    onChange={(e) => setNewStoreName(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-slate-400 rounded-lg px-3 py-2 text-xs focus:bg-white focus:outline-none transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Website Domain</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. vintagewines.com"
+                    value={newStoreDomain}
+                    onChange={(e) => setNewStoreDomain(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-slate-400 rounded-lg px-3 py-2 text-xs focus:bg-white focus:outline-none transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Sitemap URL</label>
+                  <input
+                    type="url"
+                    required
+                    placeholder="e.g. https://vintagewines.com/sitemap.xml"
+                    value={newStoreSitemap}
+                    onChange={(e) => setNewStoreSitemap(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-slate-400 rounded-lg px-3 py-2 text-xs focus:bg-white focus:outline-none transition-all"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                    Sitemaps contain all of the product URLs. Eagle Eye will load this sitemap via Playwright to discover products.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsAddStoreOpen(false)}
+                    className="px-4 py-2 text-xs font-semibold rounded-lg hover:bg-slate-100 text-slate-600 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingStore}
+                    className="bg-amber-400 hover:bg-amber-300 text-slate-950 px-4 py-2 text-xs font-bold rounded-lg transition-all shadow-md active:scale-95 disabled:opacity-50"
+                  >
+                    {isSubmittingStore ? 'Adding...' : 'Save Competitor'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

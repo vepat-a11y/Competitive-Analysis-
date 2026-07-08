@@ -54,8 +54,8 @@ def init_db():
     # Seed the 3 target stores if they don't exist
     stores_data = [
         ("Butler's Wine & Spirits", "butlerswineandspirits.com", "https://butlerswineandspirits.com/sitemap.xml"),
-        ("Midnight Liquor", "midnightliquor.com", "https://midnightliquor.com/sitemap.xml"),
-        ("Straight Up Wines & Liquors", "straightupwines.com", "https://straightupwines.com/sitemap.xml")
+        ("Midnight Liquor", "midnightliquors.com", "https://midnightliquors.com/sitemap.xml"),
+        ("Straight Up Wines & Liquors", "straightupliquor.com", "https://straightupliquor.com/sitemap.xml")
     ]
     
     for store in stores_data:
