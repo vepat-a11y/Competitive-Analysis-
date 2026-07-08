@@ -1,0 +1,6 @@
+{
+  "name": "Competitor Intelligence Dashboard",
+  "description": "A high-fidelity competitor intelligence dashboard for liquor stores in Kenmore/Tonawanda NY, tracking prices, sales velocity, and new arrivals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
