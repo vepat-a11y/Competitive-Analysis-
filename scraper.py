@@ -20,6 +20,18 @@ except ImportError:
 # --- PLAYWRIGHT SITEMAP FETCH AND PARSE ---
 async def fetch_sitemap_content(page, url: str) -> str:
     try:
+        # Check if this is the primary sitemap and needs warmup
+        if url.lower().endswith("/sitemap.xml") or url.lower().endswith("sitemap.xml"):
+            try:
+                parsed = urllib.parse.urlparse(url)
+                homepage = f"{parsed.scheme}://{parsed.netloc}/"
+                print(f"    [+] Session warm-up: Visiting homepage {homepage}...")
+                # Visit homepage with a short timeout to set session/cookies
+                await page.goto(homepage, wait_until="domcontentloaded", timeout=25000)
+                await page.wait_for_timeout(2000)
+            except Exception as e:
+                print(f"    [!] Session warm-up skipped/failed: {e}")
+
         print(f"    [+] Loading sitemap page: {url}")
         # Try navigating directly to sitemap XML URL
         await page.goto(url, wait_until="domcontentloaded", timeout=40000)
@@ -133,6 +145,14 @@ async def scrape_one_product(context, url: str):
         await stealth_async(page)
 
     try:
+        # Block heavy resources (images, styles, fonts, media) for rapid page loads
+        async def block_resources(route):
+            if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", block_resources)
+
         # Optimize load time by using domcontentloaded
         await page.goto(url, wait_until="domcontentloaded", timeout=40000)
         html = await page.content()
@@ -276,9 +296,11 @@ async def run_crawl(target_store_id: int = None):
                 "--no-sandbox",
                 "--disable-setuid-sandbox"
             ]
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             context = await pw.chromium.launch_persistent_context(
                 profile_dir, 
                 headless=True, 
+                user_agent=ua,
                 viewport={"width": 1366, "height": 900},
                 args=browser_args
             )
