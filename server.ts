@@ -209,16 +209,16 @@ app.get('/api/store/:id', async (req, res) => {
     const products = await db.all<Product>('SELECT * FROM products WHERE store_id = ?', [storeId]);
 
     // Fetch daily metrics for these products over past 30 days
-    const productIds = products.map(p => p.id);
-    if (productIds.length === 0) {
+    if (products.length === 0) {
       return res.json({ store, products: [] });
     }
 
-    // Construct comma separated placeholders for SQLite query
-    const placeholders = productIds.map(() => '?').join(',');
     const metrics = await db.all<DailyMetric>(
-      `SELECT * FROM daily_metrics WHERE product_id IN (${placeholders}) AND scrape_date >= ? ORDER BY product_id, scrape_date ASC`,
-      [...productIds, thirtyDaysAgoStr]
+      `SELECT m.* FROM daily_metrics m 
+       JOIN products p ON m.product_id = p.id 
+       WHERE p.store_id = ? AND m.scrape_date >= ? 
+       ORDER BY m.product_id, m.scrape_date ASC`,
+      [storeId, thirtyDaysAgoStr]
     );
 
     const metricsByProduct: { [productId: number]: DailyMetric[] } = {};

@@ -1,7 +1,8 @@
 import path from 'path';
 import fs from 'fs';
+import Database from 'better-sqlite3';
 
-const DB_PATH = path.resolve(process.cwd(), 'competitor_intelligence.json');
+const DB_PATH = path.resolve(process.cwd(), 'competitor_intelligence.sqlite');
 
 export interface Store {
   id: number;
@@ -29,231 +30,57 @@ export interface DailyMetric {
   stock_level: number;
 }
 
-interface DBData {
-  stores: Store[];
-  products: Product[];
-  daily_metrics: DailyMetric[];
-  nextStoreId: number;
-  nextProductId: number;
-  nextMetricId: number;
-}
-
 class DatabaseWrapper {
-  private filePath: string;
-  private data: DBData;
-  public isSeeding = false;
+  private db: Database.Database;
+  public isSeeding = false; // Kept for API compatibility
 
   constructor(filePath: string) {
-    this.filePath = filePath;
-    this.data = this.load();
+    this.db = new Database(filePath);
+    this.db.pragma('journal_mode = WAL');
   }
 
-  private load(): DBData {
-    try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf-8');
-        return JSON.parse(raw);
-      }
-    } catch (e) {
-      console.error('[DB] Failed to load JSON database, starting fresh', e);
-    }
-    return {
-      stores: [],
-      products: [],
-      daily_metrics: [],
-      nextStoreId: 1,
-      nextProductId: 1,
-      nextMetricId: 1
-    };
-  }
-
-  private save(): void {
-    try {
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
-    } catch (e) {
-      console.error('[DB] Failed to save JSON database', e);
-    }
+  public getRawDb() {
+    return this.db;
   }
 
   public forceSave(): void {
-    this.save();
+    // No-op for real SQLite, data is written automatically
   }
 
   async run(sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> {
-    const query = sql.trim().replace(/\s+/g, ' ');
-    const lowerQuery = query.toLowerCase();
-
-    if (lowerQuery.startsWith('create table')) {
+    try {
+      const stmt = this.db.prepare(sql);
+      const info = stmt.run(...params);
+      return { lastID: Number(info.lastInsertRowid), changes: info.changes };
+    } catch (e) {
+      console.error('[DB Run Error]', e, sql, params);
       return { lastID: 0, changes: 0 };
     }
-
-    if (lowerQuery.includes('insert into stores')) {
-      this.data.stores = [
-        { id: 1, name: "Butler's Wine & Spirits", domain: 'butlerswineandspirits.com', sitemap_url: 'https://butlerswineandspirits.com/sitemap.xml' },
-        { id: 2, name: 'Midnight Liquor', domain: 'midnightliquors.com', sitemap_url: 'https://midnightliquors.com/sitemap.xml' },
-        { id: 3, name: 'Straight Up Wines & Liquors', domain: 'straightupliquor.com', sitemap_url: 'https://straightupliquor.com/sitemap.xml' }
-      ];
-      this.data.nextStoreId = 4;
-      if (!this.isSeeding) this.save();
-      return { lastID: 3, changes: 3 };
-    }
-
-    if (lowerQuery.includes('insert into products')) {
-      const [store_id, variant_id, name, size, upc, first_seen_date] = params;
-      let existing = this.data.products.find(p => p.store_id === store_id && p.variant_id === variant_id);
-      if (!existing) {
-        const id = this.data.nextProductId++;
-        this.data.products.push({
-          id,
-          store_id,
-          variant_id,
-          name,
-          size,
-          upc,
-          first_seen_date
-        });
-        if (!this.isSeeding) this.save();
-        return { lastID: id, changes: 1 };
-      } else {
-        return { lastID: existing.id, changes: 0 };
-      }
-    }
-
-    if (lowerQuery.includes('insert or replace into daily_metrics') || lowerQuery.includes('insert into daily_metrics')) {
-      const [product_id, scrape_date, regular_price, sale_price, stock_level] = params;
-      let existingIndex = this.data.daily_metrics.findIndex(m => m.product_id === product_id && m.scrape_date === scrape_date);
-      if (existingIndex !== -1) {
-        this.data.daily_metrics[existingIndex] = {
-          ...this.data.daily_metrics[existingIndex],
-          regular_price,
-          sale_price,
-          stock_level
-        };
-        if (!this.isSeeding) this.save();
-        return { lastID: this.data.daily_metrics[existingIndex].id, changes: 1 };
-      } else {
-        const id = this.data.nextMetricId++;
-        this.data.daily_metrics.push({
-          id,
-          product_id,
-          scrape_date,
-          regular_price,
-          sale_price,
-          stock_level
-        });
-        if (!this.isSeeding) this.save();
-        return { lastID: id, changes: 1 };
-      }
-    }
-
-    if (lowerQuery.includes('delete from daily_metrics')) {
-      this.data.daily_metrics = [];
-      this.data.nextMetricId = 1;
-      if (!this.isSeeding) this.save();
-      return { lastID: 0, changes: 1 };
-    }
-
-    if (lowerQuery.includes('delete from products')) {
-      this.data.products = [];
-      this.data.nextProductId = 1;
-      if (!this.isSeeding) this.save();
-      return { lastID: 0, changes: 1 };
-    }
-
-    return { lastID: 0, changes: 0 };
   }
 
   async all<T>(sql: string, params: any[] = []): Promise<T[]> {
-    const query = sql.trim().replace(/\s+/g, ' ');
-    const lowerQuery = query.toLowerCase();
-
-    // 1. SELECT COUNT(*) as count FROM stores
-    if (lowerQuery.includes('select count(*)') && lowerQuery.includes('from stores')) {
-      return [{ count: this.data.stores.length }] as any;
+    try {
+      const stmt = this.db.prepare(sql);
+      return stmt.all(...params) as T[];
+    } catch (e) {
+      console.error('[DB All Error]', e, sql, params);
+      return [];
     }
-
-    // 2. SELECT COUNT(*) as count FROM products
-    if (lowerQuery.includes('select count(*)') && lowerQuery.includes('from products')) {
-      return [{ count: this.data.products.length }] as any;
-    }
-
-    // 3. SELECT * FROM stores
-    if (lowerQuery.startsWith('select * from stores') && !lowerQuery.includes('where')) {
-      return JSON.parse(JSON.stringify(this.data.stores)) as T[];
-    }
-
-    // 4. SELECT * FROM products WHERE store_id = ?
-    if (lowerQuery.startsWith('select * from products') && lowerQuery.includes('where store_id =')) {
-      const storeId = params[0];
-      const filtered = this.data.products.filter(p => p.store_id === storeId);
-      return JSON.parse(JSON.stringify(filtered)) as T[];
-    }
-
-    // 5. SELECT * FROM products
-    if (lowerQuery.startsWith('select * from products') && !lowerQuery.includes('where')) {
-      return JSON.parse(JSON.stringify(this.data.products)) as T[];
-    }
-
-    // 6. SELECT * FROM daily_metrics WHERE product_id IN (...) AND scrape_date >= ? ORDER BY product_id, scrape_date ASC
-    if (lowerQuery.includes('product_id in (')) {
-      // Find where product_id is in params list and date >= last param
-      const dateVal = params[params.length - 1];
-      const prodIds = params.slice(0, params.length - 1);
-      const filtered = this.data.daily_metrics.filter(m => prodIds.includes(m.product_id) && m.scrape_date >= dateVal);
-      filtered.sort((a, b) => {
-        if (a.product_id !== b.product_id) return a.product_id - b.product_id;
-        return a.scrape_date.localeCompare(b.scrape_date);
-      });
-      return JSON.parse(JSON.stringify(filtered)) as T[];
-    }
-
-    // 7. SELECT * FROM daily_metrics WHERE scrape_date >= ? ORDER BY product_id, scrape_date ASC
-    if (lowerQuery.startsWith('select * from daily_metrics') && lowerQuery.includes('scrape_date >=') && !lowerQuery.includes('product_id =')) {
-      const dateVal = params[0];
-      const filtered = this.data.daily_metrics.filter(m => m.scrape_date >= dateVal);
-      filtered.sort((a, b) => {
-        if (a.product_id !== b.product_id) return a.product_id - b.product_id;
-        return a.scrape_date.localeCompare(b.scrape_date);
-      });
-      return JSON.parse(JSON.stringify(filtered)) as T[];
-    }
-
-    return [] as T[];
   }
 
   async get<T>(sql: string, params: any[] = []): Promise<T | undefined> {
-    const query = sql.trim().replace(/\s+/g, ' ');
-    const lowerQuery = query.toLowerCase();
-
-    // 1. SELECT COUNT(*) as count FROM stores
-    if (lowerQuery.includes('select count(*)') && lowerQuery.includes('from stores')) {
-      return { count: this.data.stores.length } as any;
+    try {
+      const stmt = this.db.prepare(sql);
+      const res = stmt.get(...params);
+      return (res as T) ?? undefined;
+    } catch (e) {
+      console.error('[DB Get Error]', e, sql, params);
+      return undefined;
     }
-
-    // 2. SELECT COUNT(*) as count FROM products
-    if (lowerQuery.includes('select count(*)') && lowerQuery.includes('from products')) {
-      return { count: this.data.products.length } as any;
-    }
-
-    // 3. SELECT * FROM stores WHERE id = ?
-    if (lowerQuery.startsWith('select * from stores') && lowerQuery.includes('where id =')) {
-      const id = params[0];
-      const store = this.data.stores.find(s => s.id === id);
-      return store ? (JSON.parse(JSON.stringify(store)) as T) : undefined;
-    }
-
-    // 4. SELECT * FROM daily_metrics WHERE product_id = ? AND scrape_date = ?
-    if (lowerQuery.startsWith('select * from daily_metrics') && lowerQuery.includes('product_id =') && lowerQuery.includes('scrape_date =')) {
-      const [productId, scrapeDate] = params;
-      const metric = this.data.daily_metrics.find(m => m.product_id === productId && m.scrape_date === scrapeDate);
-      return metric ? (JSON.parse(JSON.stringify(metric)) as T) : undefined;
-    }
-
-    return undefined;
   }
 
   async close(): Promise<void> {
-    // No-op for JSON DB
+    this.db.close();
   }
 }
 
@@ -291,27 +118,28 @@ function generateAllSampleProducts(): Array<{ name: string; size: string; upc: s
     return state / 233280;
   }
 
-  // Generate 1100 deterministic products
-  for (let i = 0; i < 1100; i++) {
-    const brand = brands[Math.floor(nextRand() * brands.length)];
-    const cat = categories[Math.floor(nextRand() * categories.length)];
-    const variant = variations[Math.floor(nextRand() * variations.length)];
-    const size = sizes[Math.floor(nextRand() * sizes.length)];
-    
-    const name = `${brand} ${variant} ${cat}`;
-    
-    const upcNum = Math.floor(100000000000 + nextRand() * 800000000000);
-    const upc = String(upcNum);
-    
-    let base_price = 15.99 + nextRand() * 85.00;
-    if (size === "375ml") base_price *= 0.6;
-    else if (size === "1L") base_price *= 1.3;
-    else if (size === "1.75L") base_price *= 1.7;
-    base_price = parseFloat(base_price.toFixed(2));
+  // Generate ALL possible combinations without limiting to 1100
+  for (const brand of brands) {
+    for (const cat of categories) {
+      for (const variant of variations) {
+        for (const size of sizes) {
+          const name = `${brand} ${variant} ${cat}`;
+          
+          const upcNum = Math.floor(100000000000 + nextRand() * 800000000000);
+          const upc = String(upcNum);
+          
+          let base_price = 15.99 + nextRand() * 85.00;
+          if (size === "375ml") base_price *= 0.6;
+          else if (size === "1L") base_price *= 1.3;
+          else if (size === "1.75L") base_price *= 1.7;
+          base_price = parseFloat(base_price.toFixed(2));
 
-    const is_sale = nextRand() < 0.35;
-    
-    list.push({ name, size, upc, base_price, is_sale });
+          const is_sale = nextRand() < 0.35;
+          
+          list.push({ name, size, upc, base_price, is_sale });
+        }
+      }
+    }
   }
 
   return list;
@@ -328,7 +156,7 @@ function seededRandom(seed: number) {
 export async function initDatabaseAndSeedIfEmpty(): Promise<void> {
   console.log('[DB] Ensuring database tables are initialized...');
   
-  // Create tables with EXACT SQLite-equivalent syntax as Python SQLAlchemy
+  // Create tables
   await db.run(`
     CREATE TABLE IF NOT EXISTS stores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,8 +207,10 @@ export async function initDatabaseAndSeedIfEmpty(): Promise<void> {
 
   // Seed Products and Daily Metrics if empty or not fully synchronized
   const productCount = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM products');
-  if (productCount && productCount.count < 3000) {
-    console.log('[DB] Database has fewer than 3000 products (has ' + productCount.count + '). Resetting and performing 30-day historical high-fidelity seeding cycle...');
+  
+  // Since we have 3 stores and 61,200 products each, total expected products > 180,000
+  if (productCount && productCount.count < 180000) {
+    console.log('[DB] Database has fewer than expected full products (has ' + productCount.count + '). Resetting and performing 30-day historical high-fidelity seeding cycle... This may take a moment to insert millions of rows.');
     
     // Clear legacy collections first
     await db.run('DELETE FROM daily_metrics');
@@ -390,132 +220,123 @@ export async function initDatabaseAndSeedIfEmpty(): Promise<void> {
     const today = new Date();
     const daysOfHistory = 30;
 
-    // Enable in-memory seeding mode to keep performance extremely high!
-    db.isSeeding = true;
+    const rawDb = db.getRawDb();
 
-    // 1. Create product catalog first
-    for (const store of storesList) {
-      let seed = store.id * 100;
-      
-      for (let i = 0; i < SAMPLE_PRODUCTS.length; i++) {
-        const item = SAMPLE_PRODUCTS[i];
-        const variant_id = `v_${store.id}_${1000 + i}`;
+    // Use a transaction for extreme high-speed bulk inserts
+    const seedEverything = rawDb.transaction(() => {
+      const insertProduct = rawDb.prepare(`
+        INSERT INTO products (store_id, variant_id, name, size, upc, first_seen_date)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const insertMetric = rawDb.prepare(`
+        INSERT OR REPLACE INTO daily_metrics (product_id, scrape_date, regular_price, sale_price, stock_level)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      // 1. Create product catalog first
+      for (const store of storesList) {
+        console.log(`[DB] Generating products for ${store.name}...`);
+        let seed = store.id * 100;
         
-        // Randomize first seen date within the last 30 days
-        const firstSeenDelta = Math.floor(seededRandom(seed++) * daysOfHistory);
-        let firstSeenDateStr = '';
-        
-        // Stagger some items to test "New Product Added" features
-        if (firstSeenDelta <= 7 && seededRandom(seed++) < 0.4) {
-          const firstSeenDate = new Date();
-          firstSeenDate.setDate(today.getDate() - Math.floor(seededRandom(seed++) * 6) - 1);
-          firstSeenDateStr = firstSeenDate.toISOString().split('T')[0];
-        } else {
-          const firstSeenDate = new Date();
-          firstSeenDate.setDate(today.getDate() - daysOfHistory);
-          firstSeenDateStr = firstSeenDate.toISOString().split('T')[0];
-        }
-
-        await db.run(`
-          INSERT INTO products (store_id, variant_id, name, size, upc, first_seen_date)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `, [store.id, variant_id, item.name, item.size, item.upc, firstSeenDateStr]);
-      }
-    }
-
-    // 2. Fetch all products to write daily_metrics
-    const allProducts = await db.all<Product>('SELECT * FROM products');
-    
-    // Day-by-day metrics generator to maintain mathematical consistency for stock level depletion (Sales velocity)
-    console.log('[DB] Writing multi-day depletion metrics...');
-    
-    // Store daily stock levels in memory to calculate stock depletion realistically day-by-day
-    const currentStockLevels: { [productId: number]: number } = {};
-    
-    // Start generating metrics from Day 30 back to Day 0
-    for (let dayIdx = daysOfHistory; dayIdx >= 0; dayIdx--) {
-      const targetDate = new Date();
-      targetDate.setDate(today.getDate() - dayIdx);
-      const targetDateStr = targetDate.toISOString().split('T')[0];
-      const dateSeedValue = parseInt(targetDateStr.replace(/-/g, ''));
-
-      for (const prod of allProducts) {
-        // Only log if product was seen at or before targetDate
-        if (prod.first_seen_date > targetDateStr) {
-          continue;
-        }
-
-        // Get matching base template
-        const itemTmpl = SAMPLE_PRODUCTS.find(x => x.name === prod.name && x.size === prod.size) || SAMPLE_PRODUCTS[0];
-        
-        // Consistent price base per product
-        const prodPriceSeed = prod.id * 73;
-        const priceVariance = (seededRandom(prodPriceSeed) * 2.5) - 1.0; // range [-1.0, 1.5]
-        const regular_price = parseFloat((itemTmpl.base_price + priceVariance).toFixed(2));
-        
-        // Determine sale status
-        let sale_price: number | null = null;
-        if (itemTmpl.is_sale) {
-          // Sales occur on specific dates based on targetDate day in blocks of 4 days
-          const dayNum = targetDate.getDate();
-          if ((dayNum % 10) < 4) {
-            const saleDiff = 1.5 + seededRandom(prod.id + dateSeedValue) * 2.5;
-            sale_price = parseFloat((regular_price - saleDiff).toFixed(2));
+        for (let i = 0; i < SAMPLE_PRODUCTS.length; i++) {
+          const item = SAMPLE_PRODUCTS[i];
+          const variant_id = `v_${store.id}_${1000 + i}`;
+          
+          // Randomize first seen date within the last 30 days
+          const firstSeenDelta = Math.floor(seededRandom(seed++) * daysOfHistory);
+          let firstSeenDateStr = '';
+          
+          // Stagger some items to test "New Product Added" features
+          if (firstSeenDelta <= 7 && seededRandom(seed++) < 0.4) {
+            const firstSeenDate = new Date();
+            firstSeenDate.setDate(today.getDate() - Math.floor(seededRandom(seed++) * 6) - 1);
+            firstSeenDateStr = firstSeenDate.toISOString().split('T')[0];
+          } else {
+            const firstSeenDate = new Date();
+            firstSeenDate.setDate(today.getDate() - daysOfHistory);
+            firstSeenDateStr = firstSeenDate.toISOString().split('T')[0];
           }
+
+          insertProduct.run(store.id, variant_id, item.name, item.size, item.upc, firstSeenDateStr);
         }
+      }
 
-        // Calculate Stock Level dynamically (depletion model)
-        let prevStock = currentStockLevels[prod.id];
-        let stock_level = 0;
+      // 2. Fetch all products to write daily_metrics
+      const allProducts = rawDb.prepare('SELECT * FROM products').all() as Product[];
+      
+      console.log('[DB] Writing multi-day depletion metrics... (Processing ~5.5M records)');
+      
+      const currentStockLevels: { [productId: number]: number } = {};
+      
+      for (let dayIdx = daysOfHistory; dayIdx >= 0; dayIdx--) {
+        const targetDate = new Date();
+        targetDate.setDate(today.getDate() - dayIdx);
+        const targetDateStr = targetDate.toISOString().split('T')[0];
+        const dateSeedValue = parseInt(targetDateStr.replace(/-/g, ''));
 
-        if (prevStock !== undefined) {
-          if (prevStock === 0) {
-            // 40% chance of restock
-            if (seededRandom(prod.id * 13 + dateSeedValue) < 0.4) {
-              stock_level = Math.floor(12 + seededRandom(prod.id * 19 + dateSeedValue) * 36); // [12, 47]
+        for (const prod of allProducts) {
+          if (prod.first_seen_date > targetDateStr) {
+            continue;
+          }
+
+          // We'll use a fast binary-search or just deterministic logic for item prices to avoid huge array lookups
+          const prodPriceSeed = prod.id * 73;
+          const basePrice = 15.99 + (seededRandom(prodPriceSeed) * 85.00); 
+          const priceVariance = (seededRandom(prodPriceSeed + 1) * 2.5) - 1.0; 
+          const regular_price = parseFloat((basePrice + priceVariance).toFixed(2));
+          
+          let sale_price: number | null = null;
+          // Determine if it was "is_sale"
+          const is_sale = seededRandom(prod.id * 89) < 0.35;
+          
+          if (is_sale) {
+            const dayNum = targetDate.getDate();
+            if ((dayNum % 10) < 4) {
+              const saleDiff = 1.5 + seededRandom(prod.id + dateSeedValue) * 2.5;
+              sale_price = parseFloat((regular_price - saleDiff).toFixed(2));
+            }
+          }
+
+          let prevStock = currentStockLevels[prod.id];
+          let stock_level = 0;
+
+          if (prevStock !== undefined) {
+            if (prevStock === 0) {
+              if (seededRandom(prod.id * 13 + dateSeedValue) < 0.4) {
+                stock_level = Math.floor(12 + seededRandom(prod.id * 19 + dateSeedValue) * 36); 
+              } else {
+                stock_level = 0;
+              }
             } else {
-              stock_level = 0;
+              const maxDepletion = Math.min(5, prevStock);
+              const depletion = Math.floor(seededRandom(prod.id * 3 + dateSeedValue) * (maxDepletion + 1));
+              stock_level = prevStock - depletion;
+              if (seededRandom(prod.id * 11 + dateSeedValue) < 0.12) {
+                stock_level += Math.floor(12 + seededRandom(prod.id * 4 + dateSeedValue) * 24);
+              }
             }
           } else {
-            // Deplete stock
-            const maxDepletion = Math.min(5, prevStock);
-            const depletion = Math.floor(seededRandom(prod.id * 3 + dateSeedValue) * (maxDepletion + 1));
-            stock_level = prevStock - depletion;
-
-            // 10% chance of receiving a shipment (increasing stock level)
-            if (seededRandom(prod.id * 11 + dateSeedValue) < 0.12) {
-              stock_level += Math.floor(12 + seededRandom(prod.id * 4 + dateSeedValue) * 24);
-            }
+            stock_level = Math.floor(10 + seededRandom(prod.id * 29 + dateSeedValue) * 50); 
           }
-        } else {
-          // Initial stock level on first day
-          stock_level = Math.floor(10 + seededRandom(prod.id * 29 + dateSeedValue) * 50); // [10, 59]
+
+          currentStockLevels[prod.id] = stock_level;
+          insertMetric.run(prod.id, targetDateStr, regular_price, sale_price, stock_level);
         }
-
-        // Update tracking map
-        currentStockLevels[prod.id] = stock_level;
-
-        // Insert metric
-        await db.run(`
-          INSERT OR REPLACE INTO daily_metrics (product_id, scrape_date, regular_price, sale_price, stock_level)
-          VALUES (?, ?, ?, ?, ?)
-        `, [prod.id, targetDateStr, regular_price, sale_price, stock_level]);
       }
-    }
-    
-    // Disable seeding mode and flush database once to disk!
-    db.isSeeding = false;
-    db.forceSave();
-    
+    });
+
+    // Execute the bulk seeding
+    seedEverything();
+
     console.log('[DB] Seeding cycle complete! High-fidelity competitor intelligence dataset ready.');
   } else {
-    console.log('[DB] SQLite database already populated.');
+    console.log('[DB] SQLite database already populated with full product catalog.');
   }
 }
 
 /**
  * Perform manual background scrape update from Express
- * Simulates visiting each sitemap, looking for CityHive payload, and logging changes.
  */
 export async function triggerDailyScrape(): Promise<void> {
   const todayStr = new Date().toISOString().split('T')[0];
@@ -524,65 +345,64 @@ export async function triggerDailyScrape(): Promise<void> {
   const yesterdayStr = yesterday.toISOString().split('T')[0];
   
   console.log(`[Manual Scrape] Starting trigger on date ${todayStr}`);
-
   const stores = await db.all<Store>('SELECT * FROM stores');
   const products = await db.all<Product>('SELECT * FROM products');
 
-  // Use in-memory seeding flag to fast-batch the inserts
-  db.isSeeding = true;
-
-  for (const store of stores) {
-    const storeProds = products.filter(p => p.store_id === store.id);
-    const dateSeedValue = parseInt(todayStr.replace(/-/g, ''));
+  const rawDb = db.getRawDb();
+  
+  const scrapeTransaction = rawDb.transaction(() => {
+    const insertMetric = rawDb.prepare(`
+      INSERT OR REPLACE INTO daily_metrics (product_id, scrape_date, regular_price, sale_price, stock_level)
+      VALUES (?, ?, ?, ?, ?)
+    `);
     
-    for (const prod of storeProds) {
-      // Find yesterday's metrics
-      const yesterdayMetric = await db.get<DailyMetric>(
-        'SELECT * FROM daily_metrics WHERE product_id = ? AND scrape_date = ?',
-        [prod.id, yesterdayStr]
-      );
+    const getYesterdayMetric = rawDb.prepare(`
+      SELECT * FROM daily_metrics WHERE product_id = ? AND scrape_date = ?
+    `);
 
-      const itemTmpl = SAMPLE_PRODUCTS.find(x => x.name === prod.name && x.size === prod.size) || SAMPLE_PRODUCTS[0];
-      const prodPriceSeed = prod.id * 73;
-      const priceVariance = (seededRandom(prodPriceSeed) * 2.5) - 1.0;
-      const regular_price = parseFloat((itemTmpl.base_price + priceVariance).toFixed(2));
+    for (const store of stores) {
+      const storeProds = products.filter(p => p.store_id === store.id);
+      const dateSeedValue = parseInt(todayStr.replace(/-/g, ''));
       
-      let sale_price: number | null = null;
-      if (itemTmpl.is_sale) {
-        const dayNum = new Date().getDate();
-        if ((dayNum % 10) < 4) {
-          const saleDiff = 1.5 + seededRandom(prod.id + dateSeedValue) * 2.5;
-          sale_price = parseFloat((regular_price - saleDiff).toFixed(2));
-        }
-      }
-
-      let stock_level = 15;
-      if (yesterdayMetric) {
-        const prevStock = yesterdayMetric.stock_level;
-        if (prevStock === 0) {
-          stock_level = seededRandom(prod.id + dateSeedValue) < 0.5 ? Math.floor(10 + seededRandom(prod.id + dateSeedValue) * 30) : 0;
-        } else {
-          // Deplete 0 to 3 units
-          const depletion = Math.floor(seededRandom(prod.id * 2 + dateSeedValue) * 4);
-          stock_level = Math.max(0, prevStock - depletion);
-          
-          // Small chance of restocking (increase)
-          if (seededRandom(prod.id * 3 + dateSeedValue) < 0.15) {
-            stock_level += Math.floor(15 + seededRandom(prod.id * 4 + dateSeedValue) * 25);
+      for (const prod of storeProds) {
+        const yesterdayMetric = getYesterdayMetric.get(prod.id, yesterdayStr) as DailyMetric | undefined;
+        
+        const prodPriceSeed = prod.id * 73;
+        const basePrice = 15.99 + (seededRandom(prodPriceSeed) * 85.00); 
+        const priceVariance = (seededRandom(prodPriceSeed + 1) * 2.5) - 1.0; 
+        const regular_price = parseFloat((basePrice + priceVariance).toFixed(2));
+        
+        let sale_price: number | null = null;
+        const is_sale = seededRandom(prod.id * 89) < 0.35;
+        if (is_sale) {
+          const dayNum = new Date().getDate();
+          if ((dayNum % 10) < 4) {
+            const saleDiff = 1.5 + seededRandom(prod.id + dateSeedValue) * 2.5;
+            sale_price = parseFloat((regular_price - saleDiff).toFixed(2));
           }
         }
+
+        let stock_level = 15;
+
+        if (yesterdayMetric) {
+          const prevStock = yesterdayMetric.stock_level;
+          if (prevStock === 0) {
+            stock_level = seededRandom(prod.id + dateSeedValue) < 0.5 ? Math.floor(10 + seededRandom(prod.id + dateSeedValue) * 30) : 0;
+          } else {
+            const depletion = Math.floor(seededRandom(prod.id * 2 + dateSeedValue) * 4);
+            stock_level = Math.max(0, prevStock - depletion);
+            if (seededRandom(prod.id * 3 + dateSeedValue) < 0.15) {
+              stock_level += Math.floor(15 + seededRandom(prod.id * 4 + dateSeedValue) * 25);
+            }
+          }
+        }
+        
+        insertMetric.run(prod.id, todayStr, regular_price, sale_price, stock_level);
       }
-
-      await db.run(`
-        INSERT OR REPLACE INTO daily_metrics (product_id, scrape_date, regular_price, sale_price, stock_level)
-        VALUES (?, ?, ?, ?, ?)
-      `, [prod.id, todayStr, regular_price, sale_price, stock_level]);
     }
-  }
+  });
 
-  // Save the state to disk and turn off isSeeding mode
-  db.isSeeding = false;
-  db.forceSave();
-
+  scrapeTransaction();
   console.log('[Manual Scrape] Completed successfully!');
 }
+
